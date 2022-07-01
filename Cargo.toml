@@ -1,0 +1,17 @@
+[package]
+name = "secret-contract-verifier"
+authors = ["Danny Morabito <danny.morabito@digiline.io>"]
+categories = ["crypto", "secret network"]
+description = "A contract verifier for secret network contracts"
+homepage = "https://scrt-contract-verifier.digiline.io/"
+license = "GPL-3.0"
+version = "0.1.0"
+readme = "README.md"
+edition = "2021"
+
+[dependencies]
+clap = { version = "3.2.8", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha256 = "1.0.3"
+sudo = "0.6.0"
