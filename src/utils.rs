@@ -3,15 +3,14 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::{fs, io};
 
-pub fn secretcli_command(args: Vec<&str>, chain_id: String, node: String) -> String {
+pub fn secretcli_command(args: Vec<&str>, stderr: bool) -> String {
     let output = Command::new("secretcli")
         .args(args)
-        .arg("--chain-id")
-        .arg(chain_id)
-        .arg("--node")
-        .arg(node)
         .output()
         .expect("failed to execute secretcli command");
+    if stderr {
+        return String::from_utf8_lossy(&output.stderr).to_string();
+    }
     String::from_utf8(output.stdout).unwrap()
 }
 
@@ -43,7 +42,8 @@ pub fn find_wasm_file(tmp_dir: &Path) -> Option<PathBuf> {
     for entry in fs::read_dir(output_dir).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
-        if path.extension().unwrap() == "wasm" {
+        let ext = path.extension();
+        if path.is_file() && ext.is_some() && ext.unwrap() == "wasm" {
             copy(path, target_wasm_path.clone()).unwrap();
             return Some(target_wasm_path);
         }

@@ -1,9 +1,10 @@
 use std::env;
 use std::env::set_current_dir;
+use std::fmt::Write as _;
 use std::fs::{remove_dir_all, remove_file};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::time::SystemTime;
 
 use clap::Parser;
@@ -43,6 +44,9 @@ struct Args {
         default_value = "https://scrt-validator.digiline.io:26657/"
     )]
     node: String,
+
+    #[clap(short, long, value_parser)]
+    require_sudo: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -76,13 +80,43 @@ fn main() {
 
     let args: Args = Args::parse();
 
-    escalate_if_needed().expect("Failed to escalate privileges");
+    if args.require_sudo {
+        escalate_if_needed().expect("Failed to escalate privileges");
+    }
 
     let code_id = args.code_id;
     let repo = args.clone().repo;
     let commit_hash = args.clone().commit;
     let database_contract = args.clone().database_contract;
     let now = SystemTime::now();
+
+    Command::new("secretcli")
+        .args(vec!["config", "node", &args.node])
+        .output()
+        .expect("Failed to run secretcli config node");
+    Command::new("secretcli")
+        .args(vec!["config", "chain-id", &args.chain_id])
+        .output()
+        .expect("Failed to run secretcli config chain-id");
+
+    let check_json = json!({
+        "check_code_id": {
+            "code_id": code_id,
+        },
+    })
+    .to_string();
+
+    let verification_result = secretcli_command(
+        vec!["query", "compute", "query", &database_contract, &check_json],
+        true,
+    );
+
+    if !verification_result.starts_with("Error: query result: encrypted: Not verified") {
+        println!("Contract is already verified");
+        println!("{}", verification_result);
+        process::exit(0);
+    }
+
     let unix_time = now
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
@@ -138,10 +172,7 @@ fn main() {
     clean(&tmp_dir);
     for optimizer_image in optimizer_images {
         if check_if_matches_code_hash_with_optimizer(&tmp_dir, code_hash.clone(), optimizer_image) {
-            println!(
-                "Code hash matches when optimizing the cargo build with {}",
-                optimizer_image
-            );
+            println!("Code hash matches when compiling with {}", optimizer_image);
             contract_verification_successful(
                 code_id,
                 repo.clone(),
@@ -218,8 +249,7 @@ fn commit_result_to_database(
             &database_contract,
             &json.to_string(),
         ],
-        args.chain_id.clone(),
-        args.node.clone(),
+        true,
     );
     println!("{}", out);
 }
@@ -256,6 +286,8 @@ fn check_if_matches_code_hash_with_optimizer(
             "{}:/optimizer",
             env::current_dir().unwrap().display()
         ))
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
         .arg(optimizer_image)
         .output()
         .expect("failed to execute process");
@@ -324,8 +356,7 @@ fn get_code_hash(code_id: &u16, args: Args) -> String {
             "list-contract-by-code",
             &code_id.to_string(),
         ],
-        args.chain_id.clone(),
-        args.node.clone(),
+        true,
     );
     let contracts_with_code_id: Vec<ContractInfo> =
         serde_json::from_str(&contracts_with_code_id_str).unwrap();
@@ -336,8 +367,7 @@ fn get_code_hash(code_id: &u16, args: Args) -> String {
             "contract-hash",
             &contracts_with_code_id[0].address,
         ],
-        args.chain_id.clone(),
-        args.node.clone(),
+        true,
     )[2..]
         .to_string()
 }
@@ -361,7 +391,7 @@ fn clone_repo(path: PathBuf, repo: String, commit_hash: String) -> Result<String
     let mut clone = Command::new("git");
     clone.arg("clone").arg(repo.clone()).arg(path);
     let mut stderr = String::new();
-    stderr.push_str(&format!("Cloning {}\n", repo));
+    writeln!(stderr, "Cloning {}", repo).unwrap();
     stderr.push_str(&(utils::get_command_stderr(clone.output())?));
     if commit_hash != "HEAD" {
         let mut reset = Command::new("git");
