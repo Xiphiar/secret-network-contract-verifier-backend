@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 use std::fs::{remove_dir_all, remove_file};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
 use clap::Parser;
@@ -12,9 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sudo::escalate_if_needed;
 
-use utils::find_wasm_file;
-
-use crate::utils::{secretcli_command, wasm_file_hash};
+use crate::utils::{secretcli_command, secretcli_execute, wasm_file_hash};
 
 mod utils;
 
@@ -86,7 +84,7 @@ fn main() {
 
     let code_id = args.code_id;
     let repo = args.clone().repo;
-    let commit_hash = args.clone().commit;
+    let mut commit_hash = args.clone().commit;
     let database_contract = args.clone().database_contract;
     let now = SystemTime::now();
 
@@ -126,6 +124,9 @@ fn main() {
         code_id, commit_hash, unix_time
     ));
     let clone_repo_out = clone_repo(tmp_dir.clone(), repo.clone(), commit_hash.clone());
+    if commit_hash == "HEAD" {
+        commit_hash = get_commit_hash(tmp_dir.clone()).unwrap();
+    }
     match clone_repo_out {
         Ok(output) => {
             println!("{}", output);
@@ -135,41 +136,9 @@ fn main() {
             return;
         }
     }
-    let code_hash = get_code_hash(&code_id, args.clone());
+    let code_hash = get_code_hash(&code_id);
     println!("Code hash to check against: {}", code_hash);
     set_current_dir(&tmp_dir).unwrap();
-    compile_with_cargo(&tmp_dir);
-    let rust_version = String::from_utf8_lossy(
-        &Command::new("rustc")
-            .arg("--version")
-            .output()
-            .expect("Failed to get rust version")
-            .stdout,
-    )
-    .to_string();
-    if check_code_hash_matching(tmp_dir.clone(), code_hash.clone()) {
-        println!("Code hash matches when compiling with cargo");
-        contract_verification_successful(
-            code_id,
-            repo.clone(),
-            commit_hash.clone(),
-            format!("cargo build {}", rust_version).as_str(),
-            database_contract.clone(),
-            args.clone(),
-        );
-    }
-    if check_if_optimized_binary_matches_code_hash(&tmp_dir, code_hash.clone()) {
-        println!("Code hash matches when optimizing the cargo build");
-        contract_verification_successful(
-            code_id,
-            repo.clone(),
-            commit_hash.clone(),
-            format!("optimized cargo build {}", rust_version).as_str(),
-            database_contract.clone(),
-            args.clone(),
-        );
-    }
-    clean(&tmp_dir);
     for optimizer_image in optimizer_images {
         if check_if_matches_code_hash_with_optimizer(&tmp_dir, code_hash.clone(), optimizer_image) {
             println!("Code hash matches when compiling with {}", optimizer_image);
@@ -179,11 +148,10 @@ fn main() {
                 commit_hash.clone(),
                 optimizer_image,
                 database_contract.clone(),
-                args.clone(),
             );
         }
     }
-    unsuccessful_contract_verification(code_id, repo, commit_hash, database_contract, args);
+    unsuccessful_contract_verification(code_id, repo, commit_hash, database_contract);
 }
 
 fn unsuccessful_contract_verification(
@@ -191,17 +159,8 @@ fn unsuccessful_contract_verification(
     repo: String,
     commit_hash: String,
     database_contract: String,
-    args: Args,
 ) {
-    commit_result_to_database(
-        code_id,
-        repo,
-        commit_hash,
-        "",
-        database_contract,
-        false,
-        args,
-    );
+    commit_result_to_database(code_id, repo, commit_hash, "", database_contract, false);
     process::exit(127);
 }
 
@@ -211,17 +170,8 @@ fn contract_verification_successful(
     commit_hash: String,
     method: &str,
     database_contract: String,
-    args: Args,
 ) {
-    commit_result_to_database(
-        code_id,
-        repo,
-        commit_hash,
-        method,
-        database_contract,
-        true,
-        args,
-    );
+    commit_result_to_database(code_id, repo, commit_hash, method, database_contract, true);
     process::exit(0);
 }
 
@@ -232,7 +182,6 @@ fn commit_result_to_database(
     method: &str,
     database_contract: String,
     verified: bool,
-    args: Args,
 ) {
     let json = json!(DatabaseMsg::WriteResult {
         code_id,
@@ -241,16 +190,13 @@ fn commit_result_to_database(
         method: method.to_string(),
         verified,
     });
-    let out = secretcli_command(
-        vec![
-            "tx",
-            "compute",
-            "execute",
-            &database_contract,
-            &json.to_string(),
-        ],
-        true,
-    );
+    let out = secretcli_execute(vec![
+        "tx",
+        "compute",
+        "execute",
+        &database_contract,
+        &json.to_string(),
+    ]);
     println!("{}", out);
 }
 
@@ -317,38 +263,7 @@ fn check_if_matches_code_hash_with_optimizer(
     false
 }
 
-fn check_if_optimized_binary_matches_code_hash(tmp_dir: &PathBuf, code_hash: String) -> bool {
-    let wasm_file_path = find_wasm_file(tmp_dir);
-    if wasm_file_path.is_none() {
-        return false;
-    }
-    println!("Attempting to optimize the binary");
-    let command = Command::new("wasm-opt")
-        .arg("-Os")
-        .arg(wasm_file_path.unwrap())
-        .current_dir(tmp_dir)
-        .output()
-        .unwrap();
-    if command.status.success() {
-        return check_code_hash_matching(tmp_dir.to_path_buf(), code_hash);
-    }
-    false
-}
-
-fn check_code_hash_matching(tmp_dir: PathBuf, code_hash: String) -> bool {
-    let wasm_file_path = find_wasm_file(&tmp_dir);
-    if let Some(wasm_file_path) = wasm_file_path {
-        let wasm_file_hash = wasm_file_hash(wasm_file_path);
-        println!(
-            "Checking if code hash {} matches wasm file hash {}",
-            code_hash, wasm_file_hash
-        );
-        return wasm_file_hash == code_hash;
-    }
-    false
-}
-
-fn get_code_hash(code_id: &u16, args: Args) -> String {
+fn get_code_hash(code_id: &u16) -> String {
     let contracts_with_code_id_str = secretcli_command(
         vec![
             "query",
@@ -356,7 +271,7 @@ fn get_code_hash(code_id: &u16, args: Args) -> String {
             "list-contract-by-code",
             &code_id.to_string(),
         ],
-        true,
+        false,
     );
     let contracts_with_code_id: Vec<ContractInfo> =
         serde_json::from_str(&contracts_with_code_id_str).unwrap();
@@ -367,36 +282,30 @@ fn get_code_hash(code_id: &u16, args: Args) -> String {
             "contract-hash",
             &contracts_with_code_id[0].address,
         ],
-        true,
+        false,
     )[2..]
         .to_string()
 }
 
-fn compile_with_cargo(tmp_dir: &PathBuf) -> Output {
-    println!("Attempting to compile with cargo");
-    let output = Command::new("cargo")
-        .arg("build")
-        .arg("--release")
-        .arg("--target")
-        .arg("wasm32-unknown-unknown")
-        .arg("--locked")
-        .env("RUSTFLAGS", "-C link-arg=-s")
-        .current_dir(tmp_dir)
-        .output()
-        .expect("failed to compile with cargo");
-    output
-}
-
 fn clone_repo(path: PathBuf, repo: String, commit_hash: String) -> Result<String, String> {
     let mut clone = Command::new("git");
-    clone.arg("clone").arg(repo.clone()).arg(path);
+    clone.arg("clone").arg(repo.clone()).arg(path.clone());
     let mut stderr = String::new();
     writeln!(stderr, "Cloning {}", repo).unwrap();
     stderr.push_str(&(utils::get_command_stderr(clone.output())?));
     if commit_hash != "HEAD" {
         let mut reset = Command::new("git");
-        reset.arg("reset").arg("--hard").arg(commit_hash);
+        reset
+            .current_dir(&path)
+            .arg("reset")
+            .arg("--hard")
+            .arg(commit_hash);
         stderr.push_str(&(utils::get_command_stderr(reset.output())?));
     }
     Ok(stderr)
+}
+fn get_commit_hash(path: PathBuf) -> Result<String, String> {
+    let mut commit_hash = Command::new("git");
+    commit_hash.arg("rev-parse").arg("HEAD").current_dir(&path);
+    Ok(utils::get_command_stderr(commit_hash.output())?)
 }
