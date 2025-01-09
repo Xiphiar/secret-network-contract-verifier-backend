@@ -15,3 +15,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha256 = "1.0.3"
 sudo = "0.6.0"
+
+mongodb = "2.1"
+bson = { version = "2", features = ["chrono-0_4"] } # Needed for using chrono datetime in doc
+chrono = "0.4" # Used for setting DateTimes
+tokio = "1"
+base64 = "0.22.1"
+
+reqwest = { version = "0.12.12", features = ["json"] }

@@ -1,47 +1,27 @@
-use std::io::Write;
-use std::process::{Command, Output, Stdio};
-use std::{env, path::PathBuf};
+use std::process::Output;
+use std::path::PathBuf;
 use std::{fs, io};
+use reqwest::Error;
 
-pub fn secretcli_command(args: Vec<&str>, stderr: bool) -> String {
-    let output = Command::new("secretcli")
-        .args(args)
-        .output()
-        .expect("failed to execute secretcli command");
-    if stderr {
-        return String::from_utf8_lossy(&output.stderr).to_string();
+use crate::types::LcdCodeHashByCodeIdResponse;
+
+pub fn get_command_stdout(output: io::Result<Output>) -> Result<String, String> {
+    if output.is_err() {
+        return Err(format!("Command Error: {}", output.unwrap_err()));
     }
-    String::from_utf8(output.stdout).unwrap()
-}
+    let out = output.unwrap();
+    if !out.status.success() {
+        println!("Failed Command StdOut: {}", &out.status);
 
-pub fn secretcli_execute(args: Vec<&str>) -> String {
-    let mut command = Command::new("secretcli")
-        .args(args)
-        .arg("--from")
-        .arg("Verifier")
-        .arg("-y")
-        .arg("--gas")
-        .arg("100000")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let command_stdin = command.stdin.as_mut().unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        println!("Failed Command StdOut: {}", stdout);
 
-    command_stdin
-        .write_all(
-            format!(
-                "{}\n",
-                env::var("VERIFIER_PASSWORD").unwrap_or("verifier".to_string())
-            )
-            .as_bytes(),
-        )
-        .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        println!("Failed Command StdErr: {}", stderr);
 
-    drop(command_stdin);
-
-    let out = command.wait_with_output().unwrap();
-    String::from_utf8(out.stdout).unwrap()
+        return Err(stderr);
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 pub fn get_command_stderr(output: io::Result<Output>) -> Result<String, String> {
@@ -57,5 +37,5 @@ pub fn get_command_stderr(output: io::Result<Output>) -> Result<String, String> 
 
 pub fn wasm_file_hash(file_path: PathBuf) -> String {
     let bytes = fs::read(file_path).expect("Failed to read file");
-    sha256::digest_bytes(&bytes)
+    sha256::digest(&bytes)
 }

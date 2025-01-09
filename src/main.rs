@@ -1,25 +1,28 @@
 use std::env;
 use std::env::set_current_dir;
+use std::error::Error;
 use std::fmt::Write as _;
 use std::fs::{remove_dir_all, remove_file};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::SystemTime;
-
 use clap::Parser;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use bson::{doc, Binary};
+use mongodb::options::{ClientOptions, FindOneAndUpdateOptions, ResolverConfig};
+use mongodb::{Client, Collection};
 use sudo::escalate_if_needed;
+use types::DatabaseDocument;
+use utils::{get_code_hash, get_command_stdout};
+use crate::utils::wasm_file_hash;
+use base64::prelude::*;
 
-use crate::utils::{secretcli_command, secretcli_execute, wasm_file_hash};
-
+mod types;
 mod utils;
 
-/// Simple program to greet a person
 #[derive(Parser, Debug, Clone, PartialEq)]
 #[clap(author, version, about, long_about = None)]
-struct Args {
+pub struct Args {
     #[clap(long, value_parser)]
     code_id: u16,
 
@@ -29,9 +32,6 @@ struct Args {
     #[clap(short, long, value_parser, default_value = "HEAD")]
     commit: String,
 
-    #[clap(short, long, value_parser)]
-    database_contract: String,
-
     #[clap(long, value_parser, default_value = "secret-4")]
     chain_id: String,
 
@@ -39,42 +39,35 @@ struct Args {
         short,
         long,
         value_parser,
-        default_value = "https://scrt-validator.digiline.io:26657/"
+        default_value = "https://secret.api.trivium.network:1317"
     )]
-    node: String,
+    lcd: String,
 
     #[clap(short, long, value_parser)]
     require_sudo: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct ContractInfo {
-    address: String,
-    code_id: u16,
-    creator: String,
-    label: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(rename_all = "snake_case")]
-enum DatabaseMsg {
-    WriteResult {
-        code_id: u16,
-        repo: String,
-        commit_hash: String,
-        method: String,
-        verified: bool,
-    },
-}
-
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let optimizer_images: Vec<&str> = vec![
-        "enigmampc/secret-contract-optimizer:1.0.7",
+        "enigmampc/secret-contract-optimizer:1.0.10",
+        "enigmampc/secret-contract-optimizer:1.0.9",
+        "enigmampc/secret-contract-optimizer:1.0.8",
+
         // 1.0.6 is the same as 1.0.7 but with support for arm -- not needed for now
+        "enigmampc/secret-contract-optimizer:1.0.7",
+
         "enigmampc/secret-contract-optimizer:1.0.5",
+
+        // 1.0.2-1.0.3 run the same version of rust as the one used in 1.0.4, so they're redundant
         "enigmampc/secret-contract-optimizer:1.0.4",
-        // 1.0.0-1.0.3 run the same version of rust as the one used in 1.0.4, so they're redundant
+
+         // 1.0.0-1.0.1 run the same version of rust
+        "enigmampc/secret-contract-optimizer:1.0.1",
     ];
+
+    let client_uri = env::var("MONGODB_URI").expect("You must set the MONGODB_URI environment var!");
+    println!("{}", client_uri);
 
     let args: Args = Args::parse();
 
@@ -85,35 +78,25 @@ fn main() {
     let code_id = args.code_id;
     let repo = args.clone().repo;
     let mut commit_hash = args.clone().commit;
-    let database_contract = args.clone().database_contract;
     let now = SystemTime::now();
 
-    Command::new("secretcli")
-        .args(vec!["config", "node", &args.node])
-        .output()
-        .expect("Failed to run secretcli config node");
-    Command::new("secretcli")
-        .args(vec!["config", "chain-id", &args.chain_id])
-        .output()
-        .expect("Failed to run secretcli config chain-id");
-
-    let check_json = json!({
-        "check_code_id": {
-            "code_id": code_id,
-        },
-    })
-    .to_string();
-
-    let verification_result = secretcli_command(
-        vec!["query", "compute", "query", &database_contract, &check_json],
-        true,
-    );
-
-    if !verification_result.starts_with("Error: query result: encrypted: Not verified") {
-        println!("Contract is already verified");
-        println!("{}", verification_result);
-        process::exit(0);
+    // A Client is needed to connect to MongoDB:
+    // An extra line of code to work around a DNS issue on Windows:
+    let options = ClientOptions::parse_with_resolver_config(&client_uri, ResolverConfig::cloudflare()).await?;
+    let client = Client::with_options(options)?;
+    if client.default_database().is_none() {
+        println!("Default database not defined in connection string");
+        return Ok(())
     }
+
+    client.list_database_names(None, None).await?;
+    let default_db = client.default_database().unwrap();
+    let db_name = default_db.name();
+    println!("Database: {}", db_name);
+
+    println!("Checking if already verified...");
+    // TODO
+    println!("TODO");
 
     let unix_time = now
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -127,77 +110,122 @@ fn main() {
     if commit_hash == "HEAD" {
         commit_hash = get_commit_hash(tmp_dir.clone()).unwrap();
     }
+    println!("Commit Hash: {}", commit_hash);
+    if commit_hash.is_empty() {
+        panic!("Failed to get commit hash");
+    }
+
     match clone_repo_out {
         Ok(output) => {
-            println!("{}", output);
+            println!("Clone Output: {}", output);
         }
         Err(e) => {
-            println!("{}", e);
-            return;
+            println!("Clone error: {}", e);
+            return Ok(());
         }
     }
-    let code_hash = get_code_hash(&code_id);
+
+    println!("Getting uploaded code hash...");
+    let code_hash = get_code_hash(&code_id, &args.lcd).await?;
     println!("Code hash to check against: {}", code_hash);
     set_current_dir(&tmp_dir).unwrap();
     for optimizer_image in optimizer_images {
-        if check_if_matches_code_hash_with_optimizer(&tmp_dir, code_hash.clone(), optimizer_image) {
+        let result_hash = compile_with_optimizer(&tmp_dir, optimizer_image);
+        if result_hash == code_hash.clone() {
             println!("Code hash matches when compiling with {}", optimizer_image);
-            contract_verification_successful(
+
+            // Get code.zip binary data
+            let zip_path = format!("{}/code.zip", tmp_dir.to_string_lossy());
+            let bytes = std::fs::read(&zip_path).unwrap();
+            let base64 = BASE64_STANDARD.encode(bytes);
+            let binary = Binary::from_base64(base64, None)?;
+
+            // This function will exit the process
+            commit_result_to_database(
+                &client,
+                args.chain_id.clone(),
                 code_id,
                 repo.clone(),
                 commit_hash.clone(),
-                optimizer_image,
-                database_contract.clone(),
-            );
+                result_hash,
+                optimizer_image.to_string(),
+                true,
+                Some(binary),
+            ).await;
+            process::exit(0);
+        } else {
+            commit_result_to_database(
+                &client,
+                args.chain_id.clone(),
+                code_id, repo.clone(),
+                commit_hash.clone(),
+                result_hash,
+                optimizer_image.to_string(),
+                false,
+                None,
+            ).await;
         }
     }
-    unsuccessful_contract_verification(code_id, repo, commit_hash, database_contract);
-}
-
-fn unsuccessful_contract_verification(
-    code_id: u16,
-    repo: String,
-    commit_hash: String,
-    database_contract: String,
-) {
-    commit_result_to_database(code_id, repo, commit_hash, "", database_contract, false);
+    // Exit with non-0 code if none of the images produced a matching hash
     process::exit(127);
 }
 
-fn contract_verification_successful(
+async fn commit_result_to_database(
+    client: &Client,
+    chain_id: String,
     code_id: u16,
     repo: String,
     commit_hash: String,
-    method: &str,
-    database_contract: String,
-) {
-    commit_result_to_database(code_id, repo, commit_hash, method, database_contract, true);
-    process::exit(0);
-}
-
-fn commit_result_to_database(
-    code_id: u16,
-    repo: String,
-    commit_hash: String,
-    method: &str,
-    database_contract: String,
+    result_hash: String,
+    builder: String,
     verified: bool,
+    zip_binary: Option<Binary>,
 ) {
-    let json = json!(DatabaseMsg::WriteResult {
-        code_id,
-        repo,
-        commit_hash,
-        method: method.to_string(),
-        verified,
-    });
-    let out = secretcli_execute(vec![
-        "tx",
-        "compute",
-        "execute",
-        &database_contract,
-        &json.to_string(),
-    ]);
-    println!("{}", out);
+    // let collection: Collection<DatabaseDocument> = client.default_database().unwrap().collection::<DatabaseDocument>("contract_verifications");
+    let collection: Collection<DatabaseDocument> = client.default_database().unwrap().collection("contract_verifications");
+
+    let filter = doc! {
+        "chain_id": chain_id.clone(),
+        "code_id": code_id.clone().to_string(),
+        "repo": repo.clone(),
+        "commit_hash": commit_hash.clone(),
+        "builder": builder.clone(),
+    };
+
+    // let new_doc = DatabaseDocument {
+    //     chain_id,
+    //     code_id: code_id.to_string(),
+    //     repo,
+    //     commit_hash,
+    //     result_hash,
+    //     builder,
+    //     verified
+    // };
+
+    let new_doc = doc! {
+        "chain_id": chain_id.clone(),
+        "code_id": code_id.to_string(),
+        "repo": repo,
+        "commit_hash": commit_hash,
+        "result_hash": result_hash,
+        "builder": builder,
+        "verified": verified,
+        "code_zip": zip_binary,
+    };
+
+    let update = doc! {
+        "$set": new_doc,
+    };
+
+    let options = FindOneAndUpdateOptions::builder().upsert(true).build();
+
+    let result = collection.find_one_and_update(filter, update, options).await;
+    // let result = collection.insert_one(new_doc, None).await;
+
+    if result.is_err() {
+        print!("Failed to add to DB: {:?}", result.unwrap());
+        process::exit(127);
+    }
 }
 
 fn clean(tmp_dir: &Path) {
@@ -206,22 +234,25 @@ fn clean(tmp_dir: &Path) {
     let gzip_file_path = tmp_dir.join("contract.wasm.gz");
     let target_dir_path = tmp_dir.join("target");
     if wasm_file_path.exists() {
+        println!("Removing wasm file {}", wasm_file_path.display());
         remove_file(&wasm_file_path).unwrap();
     }
     if gzip_file_path.exists() {
+        println!("Removing gzip file {}", gzip_file_path.display());
         remove_file(&gzip_file_path).unwrap();
     }
     if target_dir_path.exists() {
-        remove_dir_all(&target_dir_path).unwrap();
+        println!("Removing target dir {}", target_dir_path.display());
+        remove_dir_all(&target_dir_path).unwrap_or_default();
     }
 }
 
-fn check_if_matches_code_hash_with_optimizer(
+fn compile_with_optimizer(
     tmp_dir: &PathBuf,
-    code_hash: String,
     optimizer_image: &str,
-) -> bool {
+) -> String {
     println!("Attempting to compile with {}", optimizer_image);
+
     let docker_out = Command::new("docker")
         .arg("run")
         .arg("--rm")
@@ -232,14 +263,18 @@ fn check_if_matches_code_hash_with_optimizer(
             "{}:/optimizer",
             env::current_dir().unwrap().display()
         ))
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        // .stdout(Stdio::inherit())
+        // .stderr(Stdio::inherit())
         .arg(optimizer_image)
         .output()
         .expect("failed to execute process");
+
     if !docker_out.status.success() {
-        return false;
+        return format!("BUILD_FAIL");
     }
+
+    let mut wasm_hash = "BUILD_FAIL".to_string();
+
     let gzip_file = tmp_dir.join("contract.wasm.gz");
     let gunzip_command = Command::new("gunzip")
         .arg(&gzip_file)
@@ -249,42 +284,22 @@ fn check_if_matches_code_hash_with_optimizer(
     if gunzip_command.status.success() {
         let wasm_file = tmp_dir.join("contract.wasm");
         if wasm_file.exists() {
-            let wasm_hash = wasm_file_hash(wasm_file);
-            println!(
-                "Checking if code hash {} matches wasm file hash {}",
-                code_hash, wasm_hash
-            );
-            if wasm_hash == code_hash {
-                return true;
-            }
+            wasm_hash = wasm_file_hash(wasm_file);
+            println!("Resulting Hash: {}", wasm_hash);
         }
     }
     clean(tmp_dir);
-    false
+    wasm_hash
 }
 
-fn get_code_hash(code_id: &u16) -> String {
-    let contracts_with_code_id_str = secretcli_command(
-        vec![
-            "query",
-            "compute",
-            "list-contract-by-code",
-            &code_id.to_string(),
-        ],
-        false,
-    );
-    let contracts_with_code_id: Vec<ContractInfo> =
-        serde_json::from_str(&contracts_with_code_id_str).unwrap();
-    secretcli_command(
-        vec![
-            "query",
-            "compute",
-            "contract-hash",
-            &contracts_with_code_id[0].address,
-        ],
-        false,
-    )[2..]
-        .to_string()
+async fn get_code_hash(code_id: &u16, lcd: &str) -> Result<String, Error> {
+    let url = format!("{}/compute/v1beta1/code_hash/by_code_id/{}", lcd, code_id);
+    let resp = reqwest::get(url)
+        .await?
+        .json::<LcdCodeHashByCodeIdResponse>()
+        .await?;
+    
+    Ok(resp.code_hash)
 }
 
 fn clone_repo(path: PathBuf, repo: String, commit_hash: String) -> Result<String, String> {
@@ -302,10 +317,28 @@ fn clone_repo(path: PathBuf, repo: String, commit_hash: String) -> Result<String
             .arg(commit_hash);
         stderr.push_str(&(utils::get_command_stderr(reset.output())?));
     }
+    let _ = zip_repo(path)?;
     Ok(stderr)
 }
+
+fn zip_repo(path: PathBuf) -> Result<String, String> {
+    let path_string = path.to_string_lossy();
+    let files = format!("{}/*", path_string);
+    let zip_file = format!("{}/code.zip", path_string);
+    let cmd = format!("zip -r {} {}", zip_file, files);
+
+    let mut zip = Command::new("bash");
+    zip.arg("-c")
+       .arg(cmd);
+
+    let output = zip.output();
+    let stdout = get_command_stdout(output)?;
+
+    Ok(stdout)
+}
+
 fn get_commit_hash(path: PathBuf) -> Result<String, String> {
     let mut commit_hash = Command::new("git");
     commit_hash.arg("rev-parse").arg("HEAD").current_dir(&path);
-    Ok(utils::get_command_stderr(commit_hash.output())?)
+    Ok(utils::get_command_stdout(commit_hash.output())?.trim().to_string())
 }
