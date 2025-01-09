@@ -292,16 +292,6 @@ fn compile_with_optimizer(
     wasm_hash
 }
 
-async fn get_code_hash(code_id: &u16, lcd: &str) -> Result<String, Error> {
-    let url = format!("{}/compute/v1beta1/code_hash/by_code_id/{}", lcd, code_id);
-    let resp = reqwest::get(url)
-        .await?
-        .json::<LcdCodeHashByCodeIdResponse>()
-        .await?;
-    
-    Ok(resp.code_hash)
-}
-
 fn clone_repo(path: PathBuf, repo: String, commit_hash: String) -> Result<String, String> {
     let mut clone = Command::new("git");
     clone.arg("clone").arg(repo.clone()).arg(path.clone());

@@ -39,3 +39,13 @@ pub fn wasm_file_hash(file_path: PathBuf) -> String {
     let bytes = fs::read(file_path).expect("Failed to read file");
     sha256::digest(&bytes)
 }
+
+pub async fn get_code_hash(code_id: &u16, lcd: &str) -> Result<String, Error> {
+    let url = format!("{}/compute/v1beta1/code_hash/by_code_id/{}", lcd, code_id);
+    let resp = reqwest::get(url)
+        .await?
+        .json::<LcdCodeHashByCodeIdResponse>()
+        .await?;
+    
+    Ok(resp.code_hash)
+}

@@ -1,8 +1,6 @@
 use bson::Binary;
 use serde::{Deserialize, Serialize};
 
-
-
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DatabaseDocument {
     pub chain_id: String,
