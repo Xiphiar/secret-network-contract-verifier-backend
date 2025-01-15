@@ -2,83 +2,54 @@ use std::env;
 use std::env::set_current_dir;
 use std::error::Error;
 use std::fmt::Write as _;
-use std::fs::{remove_dir_all, remove_file};
-use std::path::{Path, PathBuf};
-use std::process;
+use std::path::PathBuf;
+use std::process::{self};
 use std::process::Command;
 use std::time::SystemTime;
 use clap::Parser;
 use bson::{doc, Binary};
+use constants::{ALREADY_VERIFIED_EXIT_CODE, DB_ERROR_EXIT_CODE, DOCKER_ERROR_EXIT_CODE, NO_MATCH_EXIT_CODE, SECRET_OPTIMIZER_IMAGES};
 use mongodb::options::{ClientOptions, FindOneAndUpdateOptions, ResolverConfig};
 use mongodb::{Client, Collection};
-use sudo::escalate_if_needed;
+// use sudo::escalate_if_needed;
 use types::DatabaseDocument;
-use utils::{get_code_hash, get_command_stdout};
+use utils::{clean_all, clean_artifacts, db_contains_code_hash, db_contains_existing_verification, get_command_stdout};
 use crate::utils::wasm_file_hash;
 use base64::prelude::*;
+use users::get_current_uid;
 
 mod types;
 mod utils;
+mod constants;
 
 #[derive(Parser, Debug, Clone, PartialEq)]
 #[clap(author, version, about, long_about = None)]
 pub struct Args {
-    #[clap(long, value_parser)]
-    code_id: u16,
-
     #[clap(long, value_parser, help = "Git url of the code")]
     repo: String,
 
     #[clap(short, long, value_parser, default_value = "HEAD")]
     commit: String,
 
-    #[clap(long, value_parser, default_value = "secret-4")]
-    chain_id: String,
-
-    #[clap(
-        short,
-        long,
-        value_parser,
-        default_value = "https://secret.api.trivium.network:1317"
-    )]
-    lcd: String,
-
-    #[clap(short, long, value_parser)]
-    require_sudo: bool,
+    // #[clap(short, long, value_parser)]
+    // require_sudo: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let optimizer_images: Vec<&str> = vec![
-        "enigmampc/secret-contract-optimizer:1.0.10",
-        "enigmampc/secret-contract-optimizer:1.0.9",
-        "enigmampc/secret-contract-optimizer:1.0.8",
-
-        // 1.0.6 is the same as 1.0.7 but with support for arm -- not needed for now
-        "enigmampc/secret-contract-optimizer:1.0.7",
-
-        "enigmampc/secret-contract-optimizer:1.0.5",
-
-        // 1.0.2-1.0.3 run the same version of rust as the one used in 1.0.4, so they're redundant
-        "enigmampc/secret-contract-optimizer:1.0.4",
-
-         // 1.0.0-1.0.1 run the same version of rust
-        "enigmampc/secret-contract-optimizer:1.0.1",
-    ];
-
     let client_uri = env::var("MONGODB_URI").expect("You must set the MONGODB_URI environment var!");
     println!("{}", client_uri);
 
     let args: Args = Args::parse();
 
-    if args.require_sudo {
-        escalate_if_needed().expect("Failed to escalate privileges");
-    }
+    // if args.require_sudo {
+    //     escalate_if_needed().expect("Failed to escalate privileges");
+    // }
 
-    let code_id = args.code_id;
     let repo = args.clone().repo;
     let mut commit_hash = args.clone().commit;
     let now = SystemTime::now();
+    let uid = get_current_uid();
 
     // A Client is needed to connect to MongoDB:
     // An extra line of code to work around a DNS issue on Windows:
@@ -89,22 +60,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(())
     }
 
+    // Connect to MongoDB
     client.list_database_names(None, None).await?;
     let default_db = client.default_database().unwrap();
     let db_name = default_db.name();
     println!("Database: {}", db_name);
 
-    println!("Checking if already verified...");
-    // TODO
-    println!("TODO");
-
+    // Clone repo to /tmp
     let unix_time = now
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let tmp_dir = env::temp_dir().join(format!(
-        "contract-verifier-{}-{}-{}",
-        code_id, commit_hash, unix_time
+        "contract-verifier-{}-{}",
+        commit_hash, unix_time
     ));
     let clone_repo_out = clone_repo(tmp_dir.clone(), repo.clone(), commit_hash.clone());
     if commit_hash == "HEAD" {
@@ -124,15 +93,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
     }
-
-    println!("Getting uploaded code hash...");
-    let code_hash = get_code_hash(&code_id, &args.lcd).await?;
-    println!("Code hash to check against: {}", code_hash);
     set_current_dir(&tmp_dir).unwrap();
-    for optimizer_image in optimizer_images {
-        let result_hash = compile_with_optimizer(&tmp_dir, optimizer_image);
-        if result_hash == code_hash.clone() {
-            println!("Code hash matches when compiling with {}", optimizer_image);
+
+    // CHeck if already verified
+    println!("Checking if already verified...");
+    let already_verified = db_contains_existing_verification(&client, &repo, &commit_hash).await;
+    if already_verified {
+        println!("Code has already been verified!");
+        clean_all(&tmp_dir);
+        process::exit(ALREADY_VERIFIED_EXIT_CODE)
+    }
+
+    // Compile with every optimizer image
+    for optimizer_image in SECRET_OPTIMIZER_IMAGES {
+        let result_hash = compile_with_optimizer(&tmp_dir, optimizer_image, &uid.to_string());
+        let matches_code_in_db = db_contains_code_hash(&client, &result_hash).await;
+        if matches_code_in_db {
+            println!("Found a matching code hash when compiling with {}", optimizer_image);
 
             // Get code.zip binary data
             let zip_path = format!("{}/code.zip", tmp_dir.to_string_lossy());
@@ -143,73 +120,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // This function will exit the process
             commit_result_to_database(
                 &client,
-                args.chain_id.clone(),
-                code_id,
                 repo.clone(),
                 commit_hash.clone(),
                 result_hash,
                 optimizer_image.to_string(),
-                true,
                 Some(binary),
             ).await;
+
+            clean_all(&tmp_dir);
             process::exit(0);
         } else {
-            commit_result_to_database(
-                &client,
-                args.chain_id.clone(),
-                code_id, repo.clone(),
-                commit_hash.clone(),
-                result_hash,
-                optimizer_image.to_string(),
-                false,
-                None,
-            ).await;
+            println!("Resulting code hash did NOT match any codes in the DB.\n")
         }
     }
     // Exit with non-0 code if none of the images produced a matching hash
-    process::exit(127);
+    process::exit(NO_MATCH_EXIT_CODE);
 }
 
 async fn commit_result_to_database(
     client: &Client,
-    chain_id: String,
-    code_id: u16,
     repo: String,
     commit_hash: String,
     result_hash: String,
     builder: String,
-    verified: bool,
     zip_binary: Option<Binary>,
 ) {
-    // let collection: Collection<DatabaseDocument> = client.default_database().unwrap().collection::<DatabaseDocument>("contract_verifications");
     let collection: Collection<DatabaseDocument> = client.default_database().unwrap().collection("contract_verifications");
 
     let filter = doc! {
-        "chain_id": chain_id.clone(),
-        "code_id": code_id.clone().to_string(),
         "repo": repo.clone(),
         "commit_hash": commit_hash.clone(),
         "builder": builder.clone(),
     };
 
-    // let new_doc = DatabaseDocument {
-    //     chain_id,
-    //     code_id: code_id.to_string(),
-    //     repo,
-    //     commit_hash,
-    //     result_hash,
-    //     builder,
-    //     verified
-    // };
-
     let new_doc = doc! {
-        "chain_id": chain_id.clone(),
-        "code_id": code_id.to_string(),
         "repo": repo,
         "commit_hash": commit_hash,
         "result_hash": result_hash,
         "builder": builder,
-        "verified": verified,
         "code_zip": zip_binary,
     };
 
@@ -220,42 +168,25 @@ async fn commit_result_to_database(
     let options = FindOneAndUpdateOptions::builder().upsert(true).build();
 
     let result = collection.find_one_and_update(filter, update, options).await;
-    // let result = collection.insert_one(new_doc, None).await;
 
     if result.is_err() {
         print!("Failed to add to DB: {:?}", result.unwrap());
-        process::exit(127);
-    }
-}
-
-fn clean(tmp_dir: &Path) {
-    println!("Cleaning up");
-    let wasm_file_path = tmp_dir.join("contract.wasm");
-    let gzip_file_path = tmp_dir.join("contract.wasm.gz");
-    let target_dir_path = tmp_dir.join("target");
-    if wasm_file_path.exists() {
-        println!("Removing wasm file {}", wasm_file_path.display());
-        remove_file(&wasm_file_path).unwrap();
-    }
-    if gzip_file_path.exists() {
-        println!("Removing gzip file {}", gzip_file_path.display());
-        remove_file(&gzip_file_path).unwrap();
-    }
-    if target_dir_path.exists() {
-        println!("Removing target dir {}", target_dir_path.display());
-        remove_dir_all(&target_dir_path).unwrap_or_default();
+        process::exit(DB_ERROR_EXIT_CODE);
     }
 }
 
 fn compile_with_optimizer(
     tmp_dir: &PathBuf,
     optimizer_image: &str,
+    uid: &str,
 ) -> String {
     println!("Attempting to compile with {}", optimizer_image);
 
     let docker_out = Command::new("docker")
         .arg("run")
         .arg("--rm")
+        .arg("-u")
+        .arg(uid)
         .arg("--volume")
         .arg(format!("{}:/contract", tmp_dir.display()))
         .arg("--volume")
@@ -270,7 +201,17 @@ fn compile_with_optimizer(
         .expect("failed to execute process");
 
     if !docker_out.status.success() {
-        return format!("BUILD_FAIL");
+        let std_err = String::from_utf8_lossy(&docker_out.stderr).to_string();
+
+        if docker_out.status.code() == Some(125) {
+            print!("Enocuntered an error starting the docker image: {}", std_err);
+            process::exit(DOCKER_ERROR_EXIT_CODE);
+        }
+
+        print!("Docker command failed: {}", std_err);
+        process::exit(DOCKER_ERROR_EXIT_CODE);
+        
+        // return format!("BUILD_FAIL");
     }
 
     let mut wasm_hash = "BUILD_FAIL".to_string();
@@ -288,7 +229,7 @@ fn compile_with_optimizer(
             println!("Resulting Hash: {}", wasm_hash);
         }
     }
-    clean(tmp_dir);
+    clean_artifacts(tmp_dir);
     wasm_hash
 }
 
