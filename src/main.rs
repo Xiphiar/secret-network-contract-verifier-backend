@@ -79,9 +79,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         commit_hash, unix_time
     ));
     let clone_repo_out = clone_repo(tmp_dir.clone(), repo.clone(), commit_hash.clone());
-    if commit_hash == "HEAD" {
-        commit_hash = get_commit_hash(tmp_dir.clone()).unwrap();
-    }
+    commit_hash = get_commit_hash(tmp_dir.clone()).unwrap();
     println!("Commit Hash: {}", commit_hash);
     if commit_hash.is_empty() {
         panic!("Failed to get commit hash");
@@ -246,21 +244,31 @@ fn compile_with_optimizer(
     wasm_hash
 }
 
-fn clone_repo(path: PathBuf, repo: String, commit_hash: String) -> Result<String, String> {
+fn clone_repo(path: PathBuf, repo: String, commit: String) -> Result<String, String> {
+    // Clone repo to temp directory
     let mut clone = Command::new("git");
     clone.arg("clone").arg(repo.clone()).arg(path.clone());
     let mut stderr = String::new();
     writeln!(stderr, "Cloning {}", repo).unwrap();
     stderr.push_str(&(utils::get_command_stderr(clone.output())?));
-    if commit_hash != "HEAD" {
-        let mut reset = Command::new("git");
-        reset
-            .current_dir(&path)
-            .arg("reset")
-            .arg("--hard")
-            .arg(commit_hash);
-        stderr.push_str(&(utils::get_command_stderr(reset.output())?));
-    }
+
+    // if commit_hash != "HEAD" {
+    //     let mut reset = Command::new("git");
+    //     reset
+    //         .current_dir(&path)
+    //         .arg("reset")
+    //         .arg("--hard")
+    //         .arg(commit_hash);
+    //     stderr.push_str(&(utils::get_command_stderr(reset.output())?));
+    // }
+
+    // Checkout commit hash/branch
+    let mut checkout = Command::new("git");
+    checkout
+        .arg("checkout")
+        .arg(commit);
+    stderr.push_str(&(utils::get_command_stderr(checkout.output())?));
+
     let _ = zip_repo(path)?;
     Ok(stderr)
 }
