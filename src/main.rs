@@ -31,6 +31,9 @@ pub struct Args {
     #[clap(short, long, value_parser, default_value = "HEAD")]
     commit: String,
 
+    #[clap(long, value_parser, help = "Specific optimizer version to use (e.g. 1.0.7)")]
+    optimizer: Option<String>,
+
     // #[clap(short, long, value_parser)]
     // require_sudo: bool,
 }
@@ -95,7 +98,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     set_current_dir(&tmp_dir).unwrap();
 
-    // CHeck if already verified
+    // Check if already verified
     println!("Checking if already verified...");
     let already_verified = db_contains_existing_verification(&client, &repo, &commit_hash).await;
     if already_verified {
@@ -104,9 +107,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         process::exit(ALREADY_VERIFIED_EXIT_CODE)
     }
 
-    // Compile with every optimizer image
-    for optimizer_image in SECRET_OPTIMIZER_IMAGES {
-        let result_hash = compile_with_optimizer(&tmp_dir, optimizer_image, &uid.to_string());
+    // Determine which optimizer images to use
+    let optimizer_images: Vec<String> = if let Some(version) = args.optimizer {
+        let image = format!("enigmampc/secret-contract-optimizer:{}", version);
+        println!("Using specified optimizer version: {}", image);
+        vec![image]
+    } else {
+        println!("No specific optimizer specified. Trying all available optimizers...");
+        SECRET_OPTIMIZER_IMAGES.iter().map(|&s| s.to_string()).collect()
+    };
+
+    // Compile with selected optimizer image(s)
+    for optimizer_image in optimizer_images {
+        let result_hash = compile_with_optimizer(&tmp_dir, &optimizer_image, &uid.to_string());
         let matches_code_in_db = db_contains_code_hash(&client, &result_hash).await;
         if matches_code_in_db {
             println!("Found a matching code hash when compiling with {}", optimizer_image);
@@ -123,7 +136,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 repo.clone(),
                 commit_hash.clone(),
                 result_hash,
-                optimizer_image.to_string(),
+                optimizer_image,
                 Some(binary),
             ).await;
 
