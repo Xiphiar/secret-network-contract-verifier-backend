@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::SystemTime;
 use clap::Parser;
 use bson::{doc, Binary};
-use constants::{ALREADY_VERIFIED_EXIT_CODE, DB_ERROR_EXIT_CODE, DOCKER_ERROR_EXIT_CODE, NO_MATCH_EXIT_CODE, SECRET_OPTIMIZER_IMAGES};
+use constants::{ALREADY_VERIFIED_EXIT_CODE, DB_ERROR_EXIT_CODE, DOCKER_ERROR_EXIT_CODE, INVALID_COMMIT_EXIT_CODE, NO_MATCH_EXIT_CODE, SECRET_OPTIMIZER_IMAGES};
 use mongodb::options::{ClientOptions, FindOneAndUpdateOptions, ResolverConfig};
 use mongodb::{Client, Collection};
 // use sudo::escalate_if_needed;
@@ -247,23 +247,28 @@ fn compile_with_optimizer(
 }
 
 fn clone_repo(path: PathBuf, repo: String, commit: String) -> Result<String, String> {
-    // Clone repo to temp directory
     println!("Cloning repo {} into directory {}", repo, path.display());
+
+    // Clone repo to temp directory
     let mut clone = Command::new("git");
     clone.arg("clone").arg(repo.clone()).arg(path.clone());
     let mut stderr = String::new();
     writeln!(stderr, "Cloning {}", repo).unwrap();
     stderr.push_str(&(utils::get_command_stderr(clone.output())?));
 
-    // if commit_hash != "HEAD" {
-    //     let mut reset = Command::new("git");
-    //     reset
-    //         .current_dir(&path)
-    //         .arg("reset")
-    //         .arg("--hard")
-    //         .arg(commit_hash);
-    //     stderr.push_str(&(utils::get_command_stderr(reset.output())?));
-    // }
+    // Validate commit exists
+    let mut validate = Command::new("git");
+    validate
+        .current_dir(&path)
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg(commit.clone());
+    
+    let validate_output = validate.output();
+    if !validate_output.map_or(false, |output| output.status.success()) {
+        println!("Invalid commit, branch or tag: {}", commit);
+        process::exit(INVALID_COMMIT_EXIT_CODE);
+    }
 
     // Checkout commit hash/branch
     println!("Checking out commit {}", commit);
