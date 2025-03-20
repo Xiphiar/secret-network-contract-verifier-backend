@@ -79,12 +79,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         commit_hash, unix_time
     ));
     let clone_repo_out = clone_repo(tmp_dir.clone(), repo.clone(), commit_hash.clone());
-    commit_hash = get_commit_hash(tmp_dir.clone()).unwrap();
-    println!("Commit Hash: {}", commit_hash);
-    if commit_hash.is_empty() {
-        panic!("Failed to get commit hash");
-    }
-
     match clone_repo_out {
         Ok(output) => {
             println!("Clone Output: {}", output);
@@ -94,6 +88,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             return Ok(());
         }
     }
+
+    // Get commit hash
+    commit_hash = get_commit_hash(tmp_dir.clone()).unwrap();
+    println!("Commit Hash: {}", commit_hash);
+    if commit_hash.is_empty() {
+        panic!("Failed to get commit hash");
+    }
+
     set_current_dir(&tmp_dir).unwrap();
 
     // Check if already verified
@@ -246,6 +248,7 @@ fn compile_with_optimizer(
 
 fn clone_repo(path: PathBuf, repo: String, commit: String) -> Result<String, String> {
     // Clone repo to temp directory
+    println!("Cloning repo {} into directory {}", repo, path.display());
     let mut clone = Command::new("git");
     clone.arg("clone").arg(repo.clone()).arg(path.clone());
     let mut stderr = String::new();
@@ -263,6 +266,7 @@ fn clone_repo(path: PathBuf, repo: String, commit: String) -> Result<String, Str
     // }
 
     // Checkout commit hash/branch
+    println!("Checking out commit {}", commit);
     let mut checkout = Command::new("git");
     checkout
         .arg("checkout")
@@ -278,6 +282,7 @@ fn zip_repo(path: PathBuf) -> Result<String, String> {
     let files = format!("{}/*", path_string);
     let zip_file = format!("{}/code.zip", path_string);
     let cmd = format!("zip -r {} {}", zip_file, files);
+    println!("Zipping repo to {}", zip_file);
 
     let mut zip = Command::new("bash");
     zip.arg("-c")
