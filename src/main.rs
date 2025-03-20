@@ -269,6 +269,7 @@ fn clone_repo(path: PathBuf, repo: String, commit: String) -> Result<String, Str
     println!("Checking out commit {}", commit);
     let mut checkout = Command::new("git");
     checkout
+        .current_dir(&path)
         .arg("checkout")
         .arg(commit);
     stderr.push_str(&(utils::get_command_stderr(checkout.output())?));
