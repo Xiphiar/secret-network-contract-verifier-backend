@@ -3,6 +3,7 @@ pub const DB_ERROR_EXIT_CODE: i32 = 125;
 pub const DOCKER_ERROR_EXIT_CODE: i32 = 126;
 pub const NO_MATCH_EXIT_CODE: i32 = 127;
 pub const INVALID_COMMIT_EXIT_CODE: i32 = 128;
+pub const NO_WASM_FILE_EXIT_CODE: i32 = 129;
 
 pub const SECRET_OPTIMIZER_IMAGES: [&'static str; 10] = [
     "ghcr.io/scrtlabs/secret-contract-optimizer:1.0.13",

@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::SystemTime;
 use clap::Parser;
 use bson::{doc, Binary};
-use constants::{ALREADY_VERIFIED_EXIT_CODE, DB_ERROR_EXIT_CODE, DOCKER_ERROR_EXIT_CODE, INVALID_COMMIT_EXIT_CODE, NO_MATCH_EXIT_CODE, SECRET_OPTIMIZER_IMAGES};
+use crate::constants::{ALREADY_VERIFIED_EXIT_CODE, DB_ERROR_EXIT_CODE, DOCKER_ERROR_EXIT_CODE, INVALID_COMMIT_EXIT_CODE, NO_MATCH_EXIT_CODE, SECRET_OPTIMIZER_IMAGES, NO_WASM_FILE_EXIT_CODE};
 use mongodb::options::{ClientOptions, FindOneAndUpdateOptions, ResolverConfig};
 use mongodb::{Client, Collection};
 // use sudo::escalate_if_needed;
@@ -17,7 +17,7 @@ use utils::{clean_all, clean_artifacts, db_contains_code_hash, db_contains_exist
 use crate::utils::wasm_file_hash;
 use base64::prelude::*;
 use users::get_current_uid;
-use semver::{Version, VersionReq};
+use semver::Version;
 
 mod types;
 mod utils;
@@ -110,12 +110,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Determine which optimizer images to use
     let optimizer_images: Vec<String> = if let Some(version) = args.optimizer {
-        let req = VersionReq::parse(">=1.0.11").unwrap();
         let parsed_version = Version::parse(&version).unwrap();
 
         let mut image = "enigmampc/secret-contract-optimizer".to_string();
         // Versions greater than 1.0.10 use ghcr.io/scrtlabs/secret-contract-optimizer
-        if req.matches(&parsed_version) {
+        if parsed_version > Version::parse("1.0.10")? {
             image = "ghcr.io/scrtlabs/secret-contract-optimizer".to_string();
         }
 
@@ -239,18 +238,60 @@ fn compile_with_optimizer(
 
     let mut wasm_hash = "BUILD_FAIL".to_string();
 
-    let gzip_file = tmp_dir.join("contract.wasm.gz");
+    // Check default location first
+    let default_gzip_file = tmp_dir.join("contract.wasm.gz");
+    let mut gzip_file_path = default_gzip_file.clone();
+    
+    if !default_gzip_file.exists() {
+        // Check for wasm.gz file in optimized-wasm directory
+        let optimized_dir = tmp_dir.join("optimized-wasm");
+        
+        if optimized_dir.exists() && optimized_dir.is_dir() {
+            let mut found_wasm_gz = false;
+            
+            // Find the first .wasm.gz file in the optimized-wasm directory
+            if let Ok(entries) = std::fs::read_dir(&optimized_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("gz") {
+                        if let Some(filename) = path.file_name().and_then(|name| name.to_str()) {
+                            if filename.ends_with(".wasm.gz") {
+                                gzip_file_path = path;
+                                found_wasm_gz = true;
+                                println!("Found optimized WASM file at: {}", gzip_file_path.display());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if !found_wasm_gz {
+                println!("No .wasm.gz file found in optimized-wasm directory");
+                // process::exit(NO_WASM_FILE_EXIT_CODE);
+            }
+        } else {
+            println!("Neither contract.wasm.gz nor optimized-wasm directory found");
+            // process::exit(NO_WASM_FILE_EXIT_CODE);
+        }
+    }
+
+    // Use the found gzip file
     let gunzip_command = Command::new("gunzip")
-        .arg(&gzip_file)
+        .arg(&gzip_file_path)
         .current_dir(&tmp_dir)
         .output()
         .expect("failed to execute process");
     if gunzip_command.status.success() {
-        let wasm_file = tmp_dir.join("contract.wasm");
+        let wasm_file = gzip_file_path.with_extension("");
         if wasm_file.exists() {
             wasm_hash = wasm_file_hash(wasm_file);
             println!("Resulting Hash: {}", wasm_hash);
+        } else {
+            println!("Wasm file does not exist at path {}", wasm_file.display())
         }
+    } else {
+        println!("Failed to unzip file at {}", gzip_file_path.display())
     }
     clean_artifacts(tmp_dir);
     wasm_hash
