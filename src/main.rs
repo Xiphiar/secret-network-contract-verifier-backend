@@ -17,6 +17,7 @@ use utils::{clean_all, clean_artifacts, db_contains_code_hash, db_contains_exist
 use crate::utils::wasm_file_hash;
 use base64::prelude::*;
 use users::get_current_uid;
+use semver::{Version, VersionReq};
 
 mod types;
 mod utils;
@@ -110,7 +111,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Determine which optimizer images to use
     let optimizer_images: Vec<String> = if let Some(version) = args.optimizer {
         let req = VersionReq::parse(">=1.0.11").unwrap();
-        let parsed_version = Version::parse(version).unwrap();
+        let parsed_version = Version::parse(&version).unwrap();
 
         let mut image = "enigmampc/secret-contract-optimizer".to_string();
         // Versions greater than 1.0.10 use ghcr.io/scrtlabs/secret-contract-optimizer
