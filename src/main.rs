@@ -109,9 +109,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Determine which optimizer images to use
     let optimizer_images: Vec<String> = if let Some(version) = args.optimizer {
-        let image = format!("enigmampc/secret-contract-optimizer:{}", version);
-        println!("Using specified optimizer version: {}", image);
-        vec![image]
+        let req = VersionReq::parse(">=1.0.11").unwrap();
+        let parsed_version = Version::parse(version).unwrap();
+
+        let mut image = "enigmampc/secret-contract-optimizer".to_string();
+        // Versions greater than 1.0.10 use ghcr.io/scrtlabs/secret-contract-optimizer
+        if (req.matches(&parsed_version)) {
+            image = "ghcr.io/scrtlabs/secret-contract-optimizer".to_string();
+        }
+
+        let optimizer = format!("{}:{}", image, version);
+        println!("Using specified optimizer: {}", optimizer);
+        vec![optimizer]
     } else {
         println!("No specific optimizer specified. Trying all available optimizers...");
         SECRET_OPTIMIZER_IMAGES.iter().map(|&s| s.to_string()).collect()

@@ -5,6 +5,9 @@ pub const NO_MATCH_EXIT_CODE: i32 = 127;
 pub const INVALID_COMMIT_EXIT_CODE: i32 = 128;
 
 pub const SECRET_OPTIMIZER_IMAGES: [&'static str; 7] = [
+    "ghcr.io/scrtlabs/secret-contract-optimizer:1.0.13",
+    "ghcr.io/scrtlabs/secret-contract-optimizer:1.0.12",
+    "ghcr.io/scrtlabs/secret-contract-optimizer:1.0.11",
     "enigmampc/secret-contract-optimizer:1.0.10",
     "enigmampc/secret-contract-optimizer:1.0.9",
     "enigmampc/secret-contract-optimizer:1.0.8",
