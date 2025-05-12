@@ -308,15 +308,24 @@ fn clone_repo(path: PathBuf, repo: String, commit: String) -> Result<String, Str
     stderr.push_str(&(utils::get_command_stderr(clone.output())?));
 
     // Validate commit exists
-    let mut validate = Command::new("git");
-    validate
-        .current_dir(&path)
-        .arg("rev-parse")
-        .arg("--verify")
-        .arg(commit.clone());
+    let mut validate_and_check = |ref_to_validate: &str| {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(&path)
+            .arg("rev-parse")
+            .arg("--verify")
+            .arg(ref_to_validate);
+
+        cmd.output().map_or(false, |output| output.status.success())
+    };
+
+    let mut is_valid_reference = validate_and_check(&commit);
+
+    if !is_valid_reference {
+        let origin_prefixed_commit = format!("origin/{}", commit);
+        is_valid_reference = validate_and_check(&origin_prefixed_commit);
+    }
     
-    let validate_output = validate.output();
-    if !validate_output.map_or(false, |output| output.status.success()) {
+    if !is_valid_reference {
         println!("Invalid commit, branch or tag: {}", commit);
         process::exit(INVALID_COMMIT_EXIT_CODE);
     }
