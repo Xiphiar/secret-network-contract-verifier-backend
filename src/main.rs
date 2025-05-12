@@ -114,7 +114,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let mut image = "enigmampc/secret-contract-optimizer".to_string();
         // Versions greater than 1.0.10 use ghcr.io/scrtlabs/secret-contract-optimizer
-        if (req.matches(&parsed_version)) {
+        if req.matches(&parsed_version) {
             image = "ghcr.io/scrtlabs/secret-contract-optimizer".to_string();
         }
 
